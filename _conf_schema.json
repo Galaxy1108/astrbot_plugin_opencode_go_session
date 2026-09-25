@@ -1,0 +1,44 @@
+{
+  "enable": {
+    "description": "启用插件",
+    "hint": "关闭后不再注入请求头，OpenCode Go 会退回使用 provider 配置里的静态 custom_headers。",
+    "type": "bool",
+    "default": true
+  },
+  "session_source": {
+    "description": "会话 ID 来源",
+    "hint": "session_id 跟随 AstrBot 会话；unified_msg_origin 跟随聊天窗口（同一个群/好友的所有会话共用一个 ID）。",
+    "type": "string",
+    "options": ["session_id", "unified_msg_origin"],
+    "default": "session_id"
+  },
+  "hash_session": {
+    "description": "对会话 ID 做哈希",
+    "hint": "开启后用 sha256 前 32 位，避免把群号/用户 ID 明文发给 OpenCode。",
+    "type": "bool",
+    "default": true
+  },
+  "session_prefix": {
+    "description": "会话 ID 前缀",
+    "hint": "便于在 OpenCode 侧识别流量来源，留空则不加前缀。",
+    "type": "string",
+    "default": "astrbot"
+  },
+  "header_name": {
+    "description": "请求头名称",
+    "type": "string",
+    "default": "x-opencode-session"
+  },
+  "match_api_base": {
+    "description": "生效的 API Base 关键字",
+    "hint": "只有 api_base 含该字符串的 provider 会被注入，默认只匹配 OpenCode。",
+    "type": "string",
+    "default": "opencode.ai"
+  },
+  "fallback_session": {
+    "description": "兜底会话 ID",
+    "hint": "取不到会话上下文时使用（例如插件发起的后台 LLM 调用）。留空则不注入，交给 provider 的 custom_headers 处理。",
+    "type": "string",
+    "default": ""
+  }
+}
