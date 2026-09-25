@@ -58,5 +58,18 @@
     "hint": "用于把 resetsAt 显示成本地时间，默认 8 即 UTC+8。支持小数，如 8、5.5、0。",
     "type": "float",
     "default": 8
+  },
+  "usage_render": {
+    "description": "用量展示形式",
+    "hint": "image=用 Pillow 画成卡片图；text=纯文本；auto=能画图就画图，失败自动回退文本。",
+    "type": "string",
+    "options": ["auto", "image", "text"],
+    "default": "auto"
+  },
+  "usage_font": {
+    "description": "卡片字体文件路径",
+    "hint": "留空则自动查找微软雅黑 / 等线 / 黑体 / Noto CJK 等常见中文字体。",
+    "type": "string",
+    "default": ""
   }
 }

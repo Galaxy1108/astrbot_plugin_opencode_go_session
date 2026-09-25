@@ -62,7 +62,29 @@ AstrBot/data/plugins/astrbot_plugin_opencode_go_session/
 
 ## 命令：`/ocgo` 用量查询
 
-发送 `/ocgo`（别名 `/opencode用量`、`/go用量`）查看三档用量与各自的重置时间：
+发送 `/ocgo`（别名 `/opencode用量`、`/go用量`）查看三档用量与各自的重置时间。
+
+默认输出一张用量卡片图（深色卡片，带进度条与重置时间，颜色随用量从绿到黄到红）：
+
+```
+┌──────────────────────────────────────────┐
+│ OpenCode Go 用量              opencode-go │
+│ 账号额度 · 已用百分比                       │
+│ 更新于 2026/9/25 20:24:21                 │
+│ 5 小时                              4%    │
+│ ██────────────────────────────────        │
+│ 重置于 2026/9/25 23:21:56   2 小时 57 分后 │
+│ 每周                                1%    │
+│ █─────────────────────────────────        │
+│ 重置于 2026/9/28 08:00:00   2 天 11 小时后 │
+│ 每月                                0%    │
+│ ──────────────────────────────────        │
+│ 重置于 2026/10/25 16:59:20  29 天 20 小时后│
+└──────────────────────────────────────────┘
+```
+
+图是**本地用 Pillow 画的**，不依赖浏览器、不依赖 AstrBot 的 t2i 配置，也不走网络。
+把 `usage_render` 设为 `text` 则输出纯文本：
 
 ```
 OpenCode Go 用量 · opencode-go
@@ -84,12 +106,14 @@ OpenCode Go 用量 · opencode-go
 
 - 数据来源：`GET <api_base>/usage`（即 `https://opencode.ai/zen/go/v1/usage`），
   返回 `{usage: {rolling, weekly, monthly}}`，每档含 `status` / `percent` / `resetsAt`
-- `5h` = 滚动 5 小时窗口，`1w` = 本周，`1m` = 本月；对应 Go 的 20% / 50% / 100% 限额
-- `resetsAt` 同时给出相对时间与本地绝对时间，时区由 `usage_timezone_offset` 控制（默认 UTC+8）
+- `rolling` = 滚动 5 小时窗口，`weekly` = 本周，`monthly` = 本月；对应 Go 的 20% / 50% / 100% 限额
+- `resetsAt` 同时给出绝对时间与相对时间，时区由 `usage_timezone_offset` 控制（默认 UTC+8）
 - 结果缓存 30 秒，连续查询不会重复打接口
+- 图片落在 `data/plugin_data/astrbot_plugin_opencode_go_session/usage_<provider>.png`
 
-进度条字符特意选用 GBK 可编码的 `█` / `─` / `※`，避免中文 Windows 下控制台或
-GBK 日志编码报错。
+字体自动查找微软雅黑 / 等线 / 黑体 / Noto CJK 等，可用 `usage_font` 指定。
+纯文本模式下的进度条字符特意选用 GBK 可编码的 `█` / `─` / `※`，
+避免中文 Windows 下控制台或 GBK 日志编码报错。
 
 ## 配置
 
@@ -105,6 +129,8 @@ GBK 日志编码报错。
 | `usage_enable` | `true` | 是否启用 `/ocgo` 命令 |
 | `usage_admin_only` | `false` | 开启后仅 AstrBot 管理员可用 |
 | `usage_timezone_offset` | `8` | 重置时间的时区偏移（小时），支持小数如 `5.5`、`0` |
+| `usage_render` | `auto` | `auto` / `image` / `text`，图片失败自动回退文本 |
+| `usage_font` | 空 | 卡片字体文件路径，留空自动查找中文字体 |
 
 ## 验证
 

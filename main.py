@@ -26,6 +26,7 @@ window is ``{status, percent, resetsAt}``.
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import functools
 import hashlib
@@ -33,6 +34,7 @@ import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -41,9 +43,10 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, register
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 PLUGIN_NAME = "astrbot_plugin_opencode_go_session"
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.2.0"
 
 DEFAULT_HEADER = "x-opencode-session"
 DEFAULT_MATCH = "opencode.ai"
@@ -60,13 +63,45 @@ USAGE_CACHE_SECONDS = 30
 BAR_FILLED = "█"
 BAR_EMPTY = "─"
 LIMITED_MARK = "※"
-# label, key in the usage payload
-USAGE_WINDOWS: tuple[tuple[str, str], ...] = (
-    ("[5h]", "rolling"),
-    ("[1w]", "weekly"),
-    ("[1m]", "monthly"),
+# (text label, card label, key in the usage payload)
+USAGE_WINDOWS: tuple[tuple[str, str, str], ...] = (
+    ("[5h]", "5 小时", "rolling"),
+    ("[1w]", "每周", "weekly"),
+    ("[1m]", "每月", "monthly"),
 )
 LIMITED_STATUSES = {"rate-limited", "rate_limited", "limited", "exceeded"}
+
+# ---- image card (drawn with Pillow, no browser / network needed) ----
+CARD_SCALE = 2
+CARD_WIDTH = 620
+CARD_PAD = 26
+CARD_RADIUS = 16
+CARD_BG = (31, 31, 31)
+CARD_BORDER = (54, 54, 54)
+COLOR_TITLE = (245, 245, 245)
+COLOR_LABEL = (232, 232, 232)
+COLOR_MUTED = (148, 148, 148)
+COLOR_TRACK = (48, 48, 48)
+COLOR_GREEN = (63, 185, 80)
+COLOR_AMBER = (210, 153, 34)
+COLOR_RED = (248, 81, 73)
+
+FONTS_REGULAR = (
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/Deng.ttf",
+    "C:/Windows/Fonts/simhei.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+)
+FONTS_BOLD = (
+    "C:/Windows/Fonts/msyhbd.ttc",
+    "C:/Windows/Fonts/Dengb.ttf",
+    "C:/Windows/Fonts/simhei.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+)
 
 SESSION_VAR: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     f"{PLUGIN_NAME}_session",
@@ -395,6 +430,32 @@ class OpenCodeGoSessionPlugin(Star):
             prefix = local.strftime("%m-%d")
         return f"{prefix} {local.strftime('%H:%M')}"
 
+    @staticmethod
+    def _window_state(window: Any) -> tuple[float, bool]:
+        """Return (percent clamped to 0..100, is_rate_limited)."""
+        if not isinstance(window, dict):
+            return 0.0, False
+        try:
+            percent = float(window.get("percent") or 0)
+        except (TypeError, ValueError):
+            percent = 0.0
+        percent = max(0.0, min(100.0, percent))
+        status = str(window.get("status") or "").strip().lower()
+        return percent, status in LIMITED_STATUSES or percent >= 100
+
+    @staticmethod
+    def _fill_color(percent: float, limited: bool) -> tuple[int, int, int]:
+        if limited or percent >= 80:
+            return COLOR_RED
+        if percent >= 50:
+            return COLOR_AMBER
+        return COLOR_GREEN
+
+    @staticmethod
+    def _stamp_text(target: datetime, tz: timezone) -> str:
+        local = target.astimezone(tz)
+        return f"{local.year}/{local.month}/{local.day} {local:%H:%M:%S}"
+
     def _format_window(
         self,
         label: str,
@@ -406,15 +467,7 @@ class OpenCodeGoSessionPlugin(Star):
         if not isinstance(window, dict):
             return f"{label} 数据缺失", False
 
-        try:
-            percent = float(window.get("percent") or 0)
-        except (TypeError, ValueError):
-            percent = 0.0
-        percent = max(0.0, min(100.0, percent))
-
-        status = str(window.get("status") or "").strip().lower()
-        limited = status in LIMITED_STATUSES or percent >= 100
-
+        percent, limited = self._window_state(window)
         line = f"{label} {self._bar(percent)} {percent:>3.0f}%"
         target = self._parse_iso(window.get("resetsAt"))
         if target is not None:
@@ -428,15 +481,199 @@ class OpenCodeGoSessionPlugin(Star):
         tz = self._display_timezone()
         lines = [f"OpenCode Go 用量 · {name}"]
         limited_any = False
-        for label, key in USAGE_WINDOWS:
-            line, limited = self._format_window(label, usage.get(key), now, tz)
+        for text_label, _card_label, key in USAGE_WINDOWS:
+            line, limited = self._format_window(text_label, usage.get(key), now, tz)
             lines.append(line)
             limited_any = limited_any or limited
-        if not any(isinstance(usage.get(key), dict) for _label, key in USAGE_WINDOWS):
+        if not any(isinstance(usage.get(key), dict) for _t, _c, key in USAGE_WINDOWS):
             lines.append("（返回里没有可识别的用量窗口）")
         if limited_any:
             lines.append(f"{LIMITED_MARK} 已限流：该窗口额度已用尽，等重置或改用免费模型")
         return "\n".join(lines)
+
+    # -------------------------------------------------------------- image card
+    def _font_path(self, bold: bool) -> str | None:
+        override = str(self._cfg("usage_font", "") or "").strip()
+        if override and os.path.isfile(override):
+            return override
+        return self._first_existing(FONTS_BOLD if bold else FONTS_REGULAR)
+
+    @staticmethod
+    def _first_existing(paths: tuple[str, ...]) -> str | None:
+        for path in paths:
+            if path and os.path.isfile(path):
+                return path
+        return None
+
+    def _card_output_path(self, name: str) -> Path:
+        out_dir = Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return out_dir / f"usage_{short_digest(name)[:8]}.png"
+
+    def _render_usage_card(self, name: str, usage: dict[str, Any]) -> str | None:
+        """Draw the usage card with Pillow. Returns a file path, or None.
+
+        Runs in a worker thread (``asyncio.to_thread``), so it must stay sync.
+        """
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[{PLUGIN_NAME}] Pillow 不可用: {exc}")
+            return None
+
+        regular = self._font_path(False)
+        bold = self._font_path(True) or regular
+        if not regular or not bold:
+            logger.debug(f"[{PLUGIN_NAME}] 找不到可用的中文字体，跳过图片渲染")
+            return None
+
+        scale = CARD_SCALE
+        tz = self._display_timezone()
+        now = datetime.now(timezone.utc)
+
+        def load(path: str, size: int):
+            return ImageFont.truetype(path, size * scale)
+
+        f_title = load(bold, 22)
+        f_sub = load(regular, 13)
+        f_meta = load(regular, 12)
+        f_label = load(regular, 16)
+        f_pct = load(bold, 16)
+        f_small = load(regular, 12)
+
+        width = CARD_WIDTH * scale
+        pad = CARD_PAD * scale
+        bar_h = 8 * scale
+        gap_label_bar = 9 * scale
+        gap_bar_reset = 8 * scale
+        gap_section = 20 * scale
+
+        rows = []
+        for _text_label, card_label, key in USAGE_WINDOWS:
+            window = usage.get(key)
+            percent, limited = self._window_state(window)
+            target = (
+                self._parse_iso(window.get("resetsAt"))
+                if isinstance(window, dict)
+                else None
+            )
+            rows.append((card_label, percent, limited, target))
+
+        # Measure with a throwaway canvas, then build the real one at that height.
+        probe = ImageDraw.Draw(Image.new("RGB", (width, 8)))
+
+        def line_h(text: str, font) -> int:
+            box = probe.textbbox((0, 0), text, font=font)
+            return box[3] - box[1]
+
+        title_h = line_h("OpenCode Go 用量", f_title)
+        sub_h = line_h("账号额度 · 已用百分比", f_sub)
+        meta_h = line_h("更新于 2000/00/00 00:00:00", f_meta)
+        label_h = line_h("5 小时", f_label)
+        reset_h = line_h("重置于 2000/00/00 00:00:00", f_small)
+
+        height = pad + title_h + 10 * scale + sub_h + 6 * scale + meta_h + 20 * scale
+        for _label, _percent, _limited, _target in rows:
+            height += label_h + gap_label_bar + bar_h + gap_bar_reset + reset_h
+            height += gap_section
+        height -= gap_section
+        if any(row[2] for row in rows):
+            height += 12 * scale + meta_h
+        height += pad
+
+        img = Image.new("RGB", (width, height), CARD_BG)
+        draw = ImageDraw.Draw(img)
+        draw.rounded_rectangle(
+            (0, 0, width - 1, height - 1),
+            radius=CARD_RADIUS * scale,
+            fill=CARD_BG,
+            outline=CARD_BORDER,
+            width=max(1, scale),
+        )
+
+        cursor = pad
+
+        # Title row: title on the left, provider name right-aligned.
+        draw.text((pad, cursor), "OpenCode Go 用量", font=f_title, fill=COLOR_TITLE)
+        name_w = probe.textlength(name, font=f_sub)
+        draw.text(
+            (width - pad - name_w, cursor + (title_h - sub_h)),
+            name,
+            font=f_sub,
+            fill=COLOR_MUTED,
+        )
+        cursor += title_h + 10 * scale
+
+        draw.text((pad, cursor), "账号额度 · 已用百分比", font=f_sub, fill=COLOR_MUTED)
+        cursor += sub_h + 6 * scale
+
+        draw.text(
+            (pad, cursor),
+            f"更新于 {self._stamp_text(now, tz)}",
+            font=f_meta,
+            fill=COLOR_MUTED,
+        )
+        cursor += meta_h + 20 * scale
+
+        track_w = width - pad * 2
+        for label, percent, limited, target in rows:
+            color = self._fill_color(percent, limited)
+            draw.text((pad, cursor), label, font=f_label, fill=COLOR_LABEL)
+            pct_text = f"{percent:.0f}%"
+            pct_w = probe.textlength(pct_text, font=f_pct)
+            draw.text(
+                (width - pad - pct_w, cursor),
+                pct_text,
+                font=f_pct,
+                fill=COLOR_TITLE,
+            )
+            cursor += label_h + gap_label_bar
+
+            draw.rounded_rectangle(
+                (pad, cursor, pad + track_w, cursor + bar_h),
+                radius=bar_h // 2,
+                fill=COLOR_TRACK,
+            )
+            if percent > 0:
+                fill_w = max(int(track_w * percent / 100.0), bar_h)
+                draw.rounded_rectangle(
+                    (pad, cursor, pad + fill_w, cursor + bar_h),
+                    radius=bar_h // 2,
+                    fill=color,
+                )
+            cursor += bar_h + gap_bar_reset
+
+            if target is not None:
+                draw.text(
+                    (pad, cursor),
+                    f"重置于 {self._stamp_text(target, tz)}",
+                    font=f_small,
+                    fill=COLOR_MUTED,
+                )
+                rel = self._relative(target, now)
+                rel_w = probe.textlength(rel, font=f_small)
+                draw.text(
+                    (width - pad - rel_w, cursor),
+                    rel,
+                    font=f_small,
+                    fill=COLOR_MUTED,
+                )
+            else:
+                draw.text((pad, cursor), "重置于 —", font=f_small, fill=COLOR_MUTED)
+            cursor += reset_h + gap_section
+
+        if any(row[2] for row in rows):
+            cursor -= gap_section
+            draw.text(
+                (pad, cursor + 12 * scale),
+                f"{LIMITED_MARK} 已限流：该窗口额度已用尽，等重置或改用免费模型",
+                font=f_meta,
+                fill=COLOR_RED,
+            )
+
+        out = self._card_output_path(name)
+        img.save(out, "PNG")
+        return str(out)
 
     @filter.command("ocgo", alias={"opencode用量", "go用量"})
     async def ocgo_usage(self, event: AstrMessageEvent):
@@ -454,25 +691,43 @@ class OpenCodeGoSessionPlugin(Star):
             )
             return
 
-        blocks: list[str] = []
+        cards: list[str] = []
+        texts: list[str] = []
+        render_mode = str(self._cfg("usage_render", "auto")).strip().lower()
+
         for index, provider in enumerate(providers):
             name = self._provider_label(provider, index)
             key = self._resolve_key(provider)
             url = self._usage_url(provider)
             if not key or not url:
-                blocks.append(f"OpenCode Go 用量 · {name}\n读取 API Key 或 api_base 失败")
+                texts.append(f"OpenCode Go 用量 · {name}\n读取 API Key 或 api_base 失败")
                 continue
             try:
                 data = await self._fetch_usage(provider, url, key)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[{PLUGIN_NAME}] 查询用量失败: {exc}")
-                blocks.append(f"OpenCode Go 用量 · {name}\n查询失败：{exc}")
+                texts.append(f"OpenCode Go 用量 · {name}\n查询失败：{exc}")
                 continue
 
             usage = data.get("usage")
             if not isinstance(usage, dict):
-                blocks.append(f"OpenCode Go 用量 · {name}\n返回里没有 usage 字段")
+                texts.append(f"OpenCode Go 用量 · {name}\n返回里没有 usage 字段")
                 continue
-            blocks.append(self._format_usage(name, usage))
 
-        yield event.plain_result("\n\n".join(blocks))
+            if render_mode != "text":
+                card = await asyncio.to_thread(
+                    self._render_usage_card,
+                    name,
+                    usage,
+                )
+                if card:
+                    cards.append(card)
+                    continue
+                if render_mode == "image":
+                    logger.warning(f"[{PLUGIN_NAME}] 图片渲染失败，回退为文本")
+            texts.append(self._format_usage(name, usage))
+
+        for card in cards:
+            yield event.image_result(card)
+        if texts:
+            yield event.plain_result("\n\n".join(texts))
