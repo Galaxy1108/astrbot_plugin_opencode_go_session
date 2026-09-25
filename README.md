@@ -60,6 +60,27 @@ AstrBot/data/plugins/astrbot_plugin_opencode_go_session/
 "custom_headers": { "x-opencode-session": "astrbot-ocgo-0001" }
 ```
 
+## 命令：`/ocgo` 用量查询
+
+发送 `/ocgo`（别名 `/opencode用量`、`/go用量`）查看三档用量与各自的重置时间：
+
+```
+OpenCode Go 用量 · opencode-go
+[5h] █─────────   2%  3 小时 17 分后重置（今天 23:21）
+[1w] █─────────   1%  2 天 11 小时后重置（09-28 08:00）
+[1m] ██████████ 100%  29 天 20 小时后重置（10-25 16:59）  ※ 已限流
+```
+
+- 数据来源：`GET <api_base>/usage`（即 `https://opencode.ai/zen/go/v1/usage`），
+  返回 `{usage: {rolling, weekly, monthly}}`，每档含 `status` / `percent` / `resetsAt`
+- `5h` = 滚动 5 小时窗口，`1w` = 本周，`1m` = 本月；对应 Go 的 20% / 50% / 100% 限额
+- `resetsAt` 同时给出相对时间与本地绝对时间，时区由 `usage_timezone_offset` 控制（默认 UTC+8）
+- `status` 为 `rate-limited` 或百分比达到 100% 时标注「已限流」
+- 结果缓存 30 秒，连续查询不会重复打接口
+
+进度条字符特意选用 GBK 可编码的 `█` / `─` / `※`，避免中文 Windows 下控制台或
+GBK 日志编码报错。
+
 ## 配置
 
 | 键 | 默认 | 说明 |
@@ -71,6 +92,9 @@ AstrBot/data/plugins/astrbot_plugin_opencode_go_session/
 | `header_name` | `x-opencode-session` | 请求头名 |
 | `match_api_base` | `opencode.ai` | 只对 `api_base` 含该串的 provider 生效 |
 | `fallback_session` | 空 | 无会话上下文时的兜底值，留空则不注入 |
+| `usage_enable` | `true` | 是否启用 `/ocgo` 命令 |
+| `usage_admin_only` | `false` | 开启后仅 AstrBot 管理员可用 |
+| `usage_timezone_offset` | `8` | 重置时间的时区偏移（小时），支持小数如 `5.5`、`0` |
 
 ## 验证
 

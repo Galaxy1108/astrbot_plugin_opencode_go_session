@@ -1,14 +1,15 @@
 name: astrbot_plugin_opencode_go_session
 display_name: OpenCode Go 会话头
-short_desc: 为 OpenCode Go 注入按会话独立的 x-opencode-session 请求头
+short_desc: 为 OpenCode Go 注入按会话独立的 x-opencode-session 请求头，并支持 /ocgo 查询用量
 desc: >-
   OpenCode Go 要求请求带上 x-opencode-session，否则返回 400 MissingSessionID。
   AstrBot 的 custom_headers 只能配一个静态值，所有会话共用。本插件在
   on_llm_request 时取当前会话 ID 存入 ContextVar，并包装 OpenCode provider 的
   SDK 客户端，让每次请求携带专属的 x-opencode-session，使 Go 的路由亲和性与
   prompt caching 按会话生效。无会话上下文的调用（如后台任务）不受影响，仍走
-  provider 配置里的静态兜底值。
-version: 1.0.0
+  provider 配置里的静态兜底值。另提供 /ocgo 命令，查询 5 小时 / 周 / 月 三档
+  用量百分比与各自的重置时间。
+version: 1.1.0
 author: Galaxy1108
 repo: https://github.com/Galaxy1108/astrbot_plugin_opencode_go_session
 astrbot_version: ">=4.16"

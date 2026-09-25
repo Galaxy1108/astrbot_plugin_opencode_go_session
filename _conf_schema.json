@@ -40,5 +40,23 @@
     "hint": "取不到会话上下文时使用（例如插件发起的后台 LLM 调用）。留空则不注入，交给 provider 的 custom_headers 处理。",
     "type": "string",
     "default": ""
+  },
+  "usage_enable": {
+    "description": "启用 /ocgo 用量查询命令",
+    "hint": "关闭后 /ocgo 不响应。命令读取 provider 的 API Key，请求 <api_base>/usage。",
+    "type": "bool",
+    "default": true
+  },
+  "usage_admin_only": {
+    "description": "用量查询仅管理员可用",
+    "hint": "开启后只有 AstrBot 管理员能执行 /ocgo。",
+    "type": "bool",
+    "default": false
+  },
+  "usage_timezone_offset": {
+    "description": "重置时间的时区偏移（小时）",
+    "hint": "用于把 resetsAt 显示成本地时间，默认 8 即 UTC+8。支持小数，如 8、5.5、0。",
+    "type": "float",
+    "default": 8
   }
 }
