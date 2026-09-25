@@ -140,3 +140,13 @@ OpenCode Go 用量 · opencode-go
 ## License
 
 MIT
+
+## Logo
+
+![logo](logo.png)
+
+图标由 AstrBot 官方 logo（
+[`dashboard/src/assets/images/astrbot_logo_mini.webp`](https://github.com/AstrBotDevs/AstrBot/blob/master/dashboard/src/assets/images/astrbot_logo_mini.webp)
+）与 OpenCode 官方品牌方块（
+[`opencode-logo-dark-square.svg`](https://github.com/anomalyco/opencode/blob/dev/packages/console/app/src/asset/brand/opencode-logo-dark-square.svg)
+）合成，仅用于标识本插件，版权归各自项目所有。
