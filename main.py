@@ -46,7 +46,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 PLUGIN_NAME = "astrbot_plugin_opencode_go_session"
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.2.1"
 
 DEFAULT_HEADER = "x-opencode-session"
 DEFAULT_MATCH = "opencode.ai"
