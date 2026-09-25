@@ -401,9 +401,10 @@ class OpenCodeGoSessionPlugin(Star):
         window: Any,
         now: datetime,
         tz: timezone,
-    ) -> str:
+    ) -> tuple[str, bool]:
+        """Return the display line and whether this window is rate limited."""
         if not isinstance(window, dict):
-            return f"{label} 数据缺失"
+            return f"{label} 数据缺失", False
 
         try:
             percent = float(window.get("percent") or 0)
@@ -420,16 +421,21 @@ class OpenCodeGoSessionPlugin(Star):
             line += f"  {self._relative(target, now)}（{self._absolute(target, now, tz)}）"
         if limited:
             line += f"  {LIMITED_MARK} 已限流"
-        return line
+        return line, limited
 
     def _format_usage(self, name: str, usage: dict[str, Any]) -> str:
         now = datetime.now(timezone.utc)
         tz = self._display_timezone()
         lines = [f"OpenCode Go 用量 · {name}"]
+        limited_any = False
         for label, key in USAGE_WINDOWS:
-            lines.append(self._format_window(label, usage.get(key), now, tz))
+            line, limited = self._format_window(label, usage.get(key), now, tz)
+            lines.append(line)
+            limited_any = limited_any or limited
         if not any(isinstance(usage.get(key), dict) for _label, key in USAGE_WINDOWS):
             lines.append("（返回里没有可识别的用量窗口）")
+        if limited_any:
+            lines.append(f"{LIMITED_MARK} 已限流：该窗口额度已用尽，等重置或改用免费模型")
         return "\n".join(lines)
 
     @filter.command("ocgo", alias={"opencode用量", "go用量"})
