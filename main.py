@@ -46,7 +46,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 PLUGIN_NAME = "astrbot_plugin_opencode_go_session"
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.3.1"
 
 DEFAULT_HEADER = "x-opencode-session"
 DEFAULT_MATCH = "opencode.ai"
@@ -451,6 +451,16 @@ class OpenCodeGoSessionPlugin(Star):
                 if isinstance(value, str) and value.strip():
                     return value.strip()
         return f"provider {index + 1}"
+
+    @classmethod
+    def _group_label(cls, provider: Any, fallback: str) -> str:
+        """Label a subscription group by its source id (usage is per key)."""
+        config = getattr(provider, "provider_config", None)
+        if isinstance(config, dict):
+            source_id = config.get("provider_source_id")
+            if isinstance(source_id, str) and source_id.strip():
+                return source_id.strip()
+        return fallback
 
     @staticmethod
     def _resolve_key(provider: Any) -> str | None:
@@ -1063,6 +1073,10 @@ class OpenCodeGoSessionPlugin(Star):
         texts: list[str] = []
         render_mode = str(self._cfg("usage_render", "auto")).strip().lower()
 
+        # 用量是按订阅（key）结算的，不是按模型条目。先按 (url, key) 去重，
+        # 避免配了 N 个模型就查 N 次、弹出 N 张图。
+        groups: dict[tuple[str, str], dict[str, Any]] = {}
+        order: list[tuple[str, str]] = []
         for index, provider in enumerate(providers):
             name = self._provider_label(provider, index)
             key = self._resolve_key(provider)
@@ -1070,6 +1084,22 @@ class OpenCodeGoSessionPlugin(Star):
             if not key or not url:
                 texts.append(f"OpenCode Go 用量 · {name}\n读取 API Key 或 api_base 失败")
                 continue
+            group_key = (url, key)
+            if group_key not in groups:
+                groups[group_key] = {
+                    "name": self._group_label(provider, name),
+                    "provider": provider,
+                    "url": url,
+                    "key": key,
+                    "count": 0,
+                }
+                order.append(group_key)
+            groups[group_key]["count"] += 1
+
+        for group_key in order:
+            group = groups[group_key]
+            name = group["name"]
+            provider, url, key = group["provider"], group["url"], group["key"]
             try:
                 data = await self._fetch_usage(provider, url, key)
             except Exception as exc:  # noqa: BLE001

@@ -91,6 +91,8 @@ OpenCode Go 用量 · opencode-go
 
 - 数据来源：`GET <api_base>/usage`（即 `https://opencode.ai/zen/go/v1/usage`），
   返回 `{usage: {rolling, weekly, monthly}}`，每档含 `status` / `percent` / `resetsAt`
+- 用量是按订阅（API Key）结算的，不是按模型条目：即使配了 30 多个模型，
+  同一个 key 也只查一次、只出一张卡（按 key 去重，卡片标题显示 source id）
 - `rolling` = 滚动 5 小时窗口，`weekly` = 本周，`monthly` = 本月；对应 Go 的 20% / 50% / 100% 限额
 - `resetsAt` 同时给出绝对时间与相对时间，时区由 `usage_timezone_offset` 控制（默认 UTC+8）
 - 结果缓存 30 秒，连续查询不会重复打接口
