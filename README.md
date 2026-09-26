@@ -116,6 +116,31 @@ OpenCode Go 用量 · opencode-go
 | `usage_timezone_offset` | `8` | 重置时间的时区偏移（小时），支持小数如 `5.5`、`0` |
 | `usage_render` | `auto` | `auto` / `image` / `text`，图片失败自动回退文本 |
 | `usage_font` | 空 | 卡片字体文件路径，留空自动查找中文字体 |
+| `fix_admin_only` | `true` | `/ocgo fix` 仅管理员可用（会改写配置，建议保持开启） |
+
+## 命令：`/ocgo fix` 一键修复协议错配
+
+OpenCode Go 按模型分了三种协议端点（见[官方 Endpoints 表](https://opencode.ai/docs/go/)），
+而 AstrBot 是按 provider 类型发请求的。最常见的翻车就是把 Responses 专用的模型
+（`gpt-6-luna`、`gpt-5.6-luna`、`grok-4.7/4.6`、`muse-spark-*-contributor`）
+或 Messages 专用的模型（`minimax-m*`、`qwen3.*`）挂在了 Chat 类型的 provider 下，
+结果每次调用都是：
+
+```
+400 {'type': 'error', 'error': {'type': 'ModelProtocolUnsupported', 'message': 'Model does not support this protocol.'}}
+```
+
+`/ocgo fix` 会自动处理（先备份 `cmd_config.json` 为 `.bak-ocgofix`）：
+
+1. 扫描所有 `api_base` 含 OpenCode 的 provider，找出已知模型的协议错配
+2. 缺失的同源 Responses / Messages provider 自动建好（复用原 source 的 key、
+   base、超时、代理与静态 headers，id 为原 id 加 `-resp` / `-msg` 后缀）
+3. 把错配的模型条目改挂到正确的 source 下，**模型 id 不变**，当前选中的模型无需重选
+4. 每个修复完的模型做一次最小实测调用，报告通过与否
+5. 全程热加载，**无需重启**
+
+`/ocgo fix check` 只诊断不写入。只认官方文档里的已知模型映射，未知模型名一律
+按 Chat 协议处理，绝不误判；非 OpenCode 的 provider 完全不动。
 
 ## 验证
 

@@ -46,7 +46,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 PLUGIN_NAME = "astrbot_plugin_opencode_go_session"
-PLUGIN_VERSION = "1.2.1"
+PLUGIN_VERSION = "1.3.0"
 
 DEFAULT_HEADER = "x-opencode-session"
 DEFAULT_MATCH = "opencode.ai"
@@ -70,6 +70,48 @@ USAGE_WINDOWS: tuple[tuple[str, str, str], ...] = (
     ("[1m]", "每月", "monthly"),
 )
 LIMITED_STATUSES = {"rate-limited", "rate_limited", "limited", "exceeded"}
+
+# ---- protocol auto-fix (OpenCode Go serves different models on different
+# ---- API protocols; a model mounted under the wrong provider type fails with
+# ---- 400 ModelProtocolUnsupported). Source:
+# ---- https://opencode.ai/docs/go/  (Endpoints table)
+GO_PROTOCOL_BY_MODEL: dict[str, str] = {
+    # Responses API: <base>/responses
+    "grok-4.7": "responses",
+    "grok-4.6": "responses",
+    "gpt-6-luna": "responses",
+    "gpt-5.6-luna": "responses",
+    "muse-spark-1.3-contributor": "responses",
+    "muse-spark-1.2-contributor": "responses",
+    # Anthropic Messages API: <base>/messages
+    "minimax-m3": "messages",
+    "minimax-m2.7": "messages",
+    "minimax-m2.5": "messages",
+    "qwen3.8-max": "messages",
+    "qwen3.8-flash": "messages",
+    "qwen3.7-max": "messages",
+    "qwen3.7-plus": "messages",
+    "qwen3.6-plus": "messages",
+    # Everything else defaults to "chat" (chat/completions) and is not flagged:
+    # unknown model names are assumed chat-compatible to avoid false positives.
+}
+SOURCE_PROTOCOL_BY_TYPE: dict[str, str] = {
+    "openai_chat_completion": "chat",
+    "openai_responses": "responses",
+    "anthropic_chat_completion": "messages",
+}
+PROTOCOL_ADAPTER_TYPE: dict[str, str] = {
+    "chat": "openai_chat_completion",
+    "responses": "openai_responses",
+    "messages": "anthropic_chat_completion",
+}
+PROTOCOL_SUFFIX: dict[str, str] = {
+    "chat": "chat",
+    "responses": "resp",
+    "messages": "msg",
+}
+FIX_BACKUP_SUFFIX = ".bak-ocgofix"
+FIX_PING_TIMEOUT = 60
 
 # ---- image card (drawn with Pillow, no browser / network needed) ----
 CARD_SCALE = 2
@@ -114,10 +156,116 @@ def short_digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()[:32]
 
 
+def normalize_base(url: Any) -> str:
+    return str(url or "").strip().rstrip("/").lower()
+
+
+def plan_protocol_fix(
+    sources: Any,
+    models: Any,
+    match: str,
+) -> dict[str, Any]:
+    """Pure planner for the OpenCode protocol mismatch problem.
+
+    Returns ``{"siblings": [...], "repoints": [...], "notes": [...]}`` where
+    ``siblings`` are provider_source dicts to create and ``repoints`` are
+    ``{"entry_id", "from_source", "to_source", "model", "required",
+    "enable"}`` moves. Never touches disk or the network.
+    """
+    match = (match or "").strip().lower()
+    go_sources: dict[str, dict[str, Any]] = {}
+    if isinstance(sources, list):
+        for entry in sources:
+            if not isinstance(entry, dict):
+                continue
+            sid = entry.get("id")
+            if not sid or not match or match not in normalize_base(entry.get("api_base")):
+                continue
+            go_sources[str(sid)] = entry
+
+    def protocol_of_source(entry: dict[str, Any]) -> str:
+        return SOURCE_PROTOCOL_BY_TYPE.get(str(entry.get("type") or ""), "chat")
+
+    # (base, protocol) -> source id, so repoints reuse an existing sibling.
+    have: dict[tuple[str, str], str] = {}
+    for sid, entry in go_sources.items():
+        have[(normalize_base(entry.get("api_base")), protocol_of_source(entry))] = sid
+
+    siblings: list[dict[str, Any]] = []
+    planned_siblings: dict[tuple[str, str], str] = dict(have)
+    repoints: list[dict[str, Any]] = []
+    notes: list[str] = []
+
+    def sibling_id(base_sid: str, protocol: str) -> str:
+        stem = f"{base_sid}-{PROTOCOL_SUFFIX.get(protocol, protocol)}"
+        taken = set(go_sources) | {s.get("id") for s in siblings}
+        if stem not in taken:
+            return stem
+        index = 2
+        while f"{stem}{index}" in taken:
+            index += 1
+        return f"{stem}{index}"
+
+    def ensure_sibling(src: dict[str, Any], protocol: str) -> str:
+        base = normalize_base(src.get("api_base"))
+        if (base, protocol) in planned_siblings:
+            return planned_siblings[(base, protocol)]
+        src_id = str(src.get("id"))
+        new_id = sibling_id(src_id, protocol)
+        raw_key = src.get("key")
+        key_copy = list(raw_key) if isinstance(raw_key, list) else raw_key
+        raw_headers = src.get("custom_headers")
+        headers_copy = dict(raw_headers) if isinstance(raw_headers, dict) else {}
+        sibling = {
+            "id": new_id,
+            "provider": src.get("provider", "openai"),
+            "type": PROTOCOL_ADAPTER_TYPE[protocol],
+            "provider_type": "chat_completion",
+            "key": key_copy,
+            "api_base": src.get("api_base"),
+            "timeout": src.get("timeout", 120),
+            "proxy": src.get("proxy", ""),
+            "custom_headers": headers_copy,
+            "enable": True,
+        }
+        siblings.append(sibling)
+        planned_siblings[(base, protocol)] = new_id
+        notes.append(f"新建 {protocol} 源 {new_id}（复用 {src_id} 的 key/base/headers）")
+        return new_id
+
+    if isinstance(models, list):
+        for entry in models:
+            if not isinstance(entry, dict):
+                continue
+            sid = entry.get("provider_source_id")
+            if sid not in go_sources:
+                continue
+            model = str(entry.get("model") or "")
+            required = GO_PROTOCOL_BY_MODEL.get(model)
+            if not required:
+                continue
+            current = protocol_of_source(go_sources[sid])
+            if required == current:
+                continue
+            target = ensure_sibling(go_sources[sid], required)
+            repoints.append(
+                {
+                    "entry_id": entry.get("id"),
+                    "model": model,
+                    "required": required,
+                    "from_source": sid,
+                    "to_source": target,
+                    "enable": bool(entry.get("enable", True)),
+                }
+            )
+
+    return {"siblings": siblings, "repoints": repoints, "notes": notes}
+
+
 @register(
     PLUGIN_NAME,
     "Galaxy1108",
-    "为 OpenCode Go 注入按会话独立的 x-opencode-session，并支持 /ocgo 查询用量",
+    "为 OpenCode Go 注入按会话独立的 x-opencode-session，支持 /ocgo 查询用量与一键修复协议错配",
     PLUGIN_VERSION,
 )
 class OpenCodeGoSessionPlugin(Star):
@@ -491,6 +639,199 @@ class OpenCodeGoSessionPlugin(Star):
             lines.append(f"{LIMITED_MARK} 已限流：该窗口额度已用尽，等重置或改用免费模型")
         return "\n".join(lines)
 
+    # ------------------------------------------------------------ protocol fix
+    @staticmethod
+    def _command_args(message: Any) -> list[str]:
+        text = str(message or "").strip()
+        for prefix in (
+            "/ocgo",
+            "ocgo",
+            "/opencode用量",
+            "opencode用量",
+            "/go用量",
+            "go用量",
+        ):
+            if text == prefix:
+                return []
+            for sep in (" ", "　"):
+                if text.startswith(prefix + sep):
+                    return text[len(prefix):].strip().split()
+        return text.split()
+
+    def _backup_config_file(self) -> str:
+        """Snapshot cmd_config.json once so /ocgo fix stays reversible."""
+        try:
+            from astrbot.core.config.astrbot_config import ASTRBOT_CONFIG_PATH
+        except Exception:
+            return ""
+        try:
+            path = Path(ASTRBOT_CONFIG_PATH)
+            raw = path.read_bytes()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[{PLUGIN_NAME}] 读取配置文件失败，跳过备份: {exc}")
+            return ""
+        backup = path.with_name(path.name + FIX_BACKUP_SUFFIX)
+        if not backup.exists():
+            try:
+                backup.write_bytes(raw)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[{PLUGIN_NAME}] 写备份失败: {exc}")
+                return ""
+        return str(backup)
+
+    def _remember_source(self, manager: Any, entry: dict[str, Any]) -> None:
+        """Make a newly added source visible to the running manager."""
+        try:
+            live = getattr(manager, "provider_sources_config", None)
+        except Exception:  # noqa: BLE001
+            live = None
+        if isinstance(live, list) and all(
+            not (isinstance(item, dict) and item.get("id") == entry.get("id"))
+            for item in live
+        ):
+            live.append(dict(entry))
+
+    async def _ping_fixed_model(
+        self,
+        manager: Any,
+        entry_id: str,
+        protocol: str,
+        model: str,
+    ) -> tuple[bool, str]:
+        """One minimal live call to prove the repointed model now answers."""
+        try:
+            inst = (getattr(manager, "inst_map", {}) or {}).get(entry_id)
+        except Exception:  # noqa: BLE001
+            inst = None
+        if inst is None:
+            return False, "实例未找到"
+        started = time.monotonic()
+        try:
+            if protocol == "responses":
+                await asyncio.wait_for(
+                    inst.client.responses.create(
+                        model=model,
+                        input="ping",
+                        max_output_tokens=8,
+                    ),
+                    timeout=FIX_PING_TIMEOUT,
+                )
+            elif protocol == "messages":
+                await asyncio.wait_for(
+                    inst.client.messages.create(
+                        model=model,
+                        max_tokens=8,
+                        messages=[{"role": "user", "content": "ping"}],
+                    ),
+                    timeout=FIX_PING_TIMEOUT,
+                )
+            else:
+                await asyncio.wait_for(
+                    inst.client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": "ping"}],
+                        max_tokens=8,
+                    ),
+                    timeout=FIX_PING_TIMEOUT,
+                )
+        except Exception as exc:  # noqa: BLE001
+            return False, f"{type(exc).__name__}: {str(exc)[:120]}"
+        return True, f"{time.monotonic() - started:.1f}s"
+
+    async def _apply_protocol_fix(self, dry_run: bool) -> str:
+        try:
+            manager = self.context.provider_manager
+        except Exception as exc:  # noqa: BLE001
+            return f"取 provider 管理器失败：{exc}"
+        try:
+            default_conf = manager.acm.default_conf
+            sources = default_conf.get("provider_sources", [])
+            models = default_conf.get("provider", [])
+        except Exception as exc:  # noqa: BLE001
+            return f"读取默认配置失败：{exc}"
+
+        plan = plan_protocol_fix(sources, models, self.api_base_match)
+        mismatches = plan["repoints"]
+        if not mismatches and not plan["siblings"]:
+            checked = sum(
+                1
+                for entry in (models if isinstance(models, list) else [])
+                if isinstance(entry, dict)
+                and GO_PROTOCOL_BY_MODEL.get(str(entry.get("model") or ""))
+                and entry.get("provider_source_id")
+            )
+            return (
+                "OpenCode Go 协议检查\n"
+                f"已检查 {checked} 个已知模型，无协议错配，无需修复。"
+            )
+
+        lines = ["OpenCode Go 协议修复" + ("（试运行，不写入）" if dry_run else "")]
+        for item in mismatches:
+            lines.append(
+                f"- {item['entry_id']}: {item['model']} "
+                f"当前挂在 {item['from_source']} 下，"
+                f"需要 {item['required']} 协议"
+                + ("" if item["enable"] else "（该条目已禁用）")
+            )
+        for note in plan["notes"]:
+            lines.append(f"- {note}")
+        if dry_run:
+            lines.append("试运行结束，未做任何修改。发送 /ocgo fix 执行修复。")
+            return "\n".join(lines)
+
+        backup = self._backup_config_file()
+        if backup:
+            lines.append(f"配置已备份：{backup}")
+        else:
+            lines.append("注意：配置文件备份失败，继续执行（AstrBot 自身仍会正常落盘）")
+
+        try:
+            if not isinstance(default_conf.get("provider_sources"), list):
+                default_conf["provider_sources"] = []
+            for sibling in plan["siblings"]:
+                default_conf["provider_sources"].append(dict(sibling))
+                self._remember_source(manager, sibling)
+            default_conf.save_config()
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"写入 provider_sources 失败，中止：{exc}")
+            return "\n".join(lines)
+
+        for item in mismatches:
+            entry_id = item["entry_id"]
+            try:
+                current = next(
+                    m for m in default_conf.get("provider", [])
+                    if isinstance(m, dict) and m.get("id") == entry_id
+                )
+            except StopIteration:
+                lines.append(f"[FAIL] {entry_id}：配置中已找不到该条目")
+                continue
+            new_entry = dict(current)
+            new_entry["provider_source_id"] = item["to_source"]
+            try:
+                await manager.update_provider(entry_id, new_entry)
+            except Exception as exc:  # noqa: BLE001
+                lines.append(f"[FAIL] {entry_id}：改挂失败 {type(exc).__name__}: {str(exc)[:120]}")
+                continue
+
+            ok, detail = await self._ping_fixed_model(
+                manager, entry_id, item["required"], item["model"]
+            )
+            state = "" if item["enable"] else "（该条目保持禁用）"
+            if ok:
+                lines.append(
+                    f"[OK] {entry_id} -> {item['to_source']}，实测通过（{detail}）{state}"
+                )
+            else:
+                lines.append(
+                    f"[WARN] {entry_id} -> {item['to_source']} 已改挂，"
+                    f"但实测未通过：{detail}{state}"
+                )
+
+        self.install_all()
+        lines.append("无需重启；模型 id 不变，直接可用。")
+        return "\n".join(lines)
+
     # -------------------------------------------------------------- image card
     def _font_path(self, bold: bool) -> str | None:
         override = str(self._cfg("usage_font", "") or "").strip()
@@ -677,8 +1018,35 @@ class OpenCodeGoSessionPlugin(Star):
 
     @filter.command("ocgo", alias={"opencode用量", "go用量"})
     async def ocgo_usage(self, event: AstrMessageEvent):
-        """查看 OpenCode Go 的 5 小时 / 周 / 月 用量与重置时间。用法：/ocgo"""
-        if not self.enabled or not bool(self._cfg("usage_enable", True)):
+        """查看 OpenCode Go 用量，或一键修复协议错配。
+
+        用法：
+          /ocgo            5 小时 / 周 / 月 用量与重置时间
+          /ocgo fix        自动修复协议错配（会改写配置，先备份）
+          /ocgo fix check  只诊断，不做任何修改
+        """
+        if not self.enabled:
+            return
+
+        args = [part.lower() for part in self._command_args(event.message_str)]
+        if args[:1] == ["fix"]:
+            if bool(self._cfg("fix_admin_only", True)) and not event.is_admin():
+                yield event.plain_result("协议修复仅管理员可用。")
+                return
+            yield event.plain_result("正在诊断 OpenCode Go 的协议配置…")
+            yield event.plain_result(
+                await self._apply_protocol_fix(dry_run="check" in args[1:])
+            )
+            return
+
+        if args[:1] not in ([],):
+            yield event.plain_result(
+                "未知参数。用法：/ocgo 查询用量；/ocgo fix 一键修复协议错配；"
+                "/ocgo fix check 只诊断不修改。"
+            )
+            return
+
+        if not bool(self._cfg("usage_enable", True)):
             return
         if bool(self._cfg("usage_admin_only", False)) and not event.is_admin():
             yield event.plain_result("OpenCode Go 用量查询仅管理员可用。")

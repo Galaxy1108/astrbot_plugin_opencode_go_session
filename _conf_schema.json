@@ -71,5 +71,11 @@
     "hint": "留空则自动查找微软雅黑 / 等线 / 黑体 / Noto CJK 等常见中文字体。",
     "type": "string",
     "default": ""
+  },
+  "fix_admin_only": {
+    "description": "/ocgo fix 仅管理员可用",
+    "hint": "修复会改写 provider 配置（先自动备份），建议保持仅管理员可用。",
+    "type": "bool",
+    "default": true
   }
 }
